@@ -8,17 +8,16 @@
 
 #define HTML_PATH ".\\html\\"
 
+
+//#define Myassert(expr) if(!(expr)) printf("Err in " __FILE__":"__LINE__"\n" #expr)
+
 sqlite3 *db = NULL;
 
-void home_handler(struct mg_connection* conn, struct mg_http_message* request) {
-	(void)request;
-
-	FILE* file = NULL;
-	file = fopen(HTML_PATH "home.html", "r");
+char* file_to_str(const char* name) {
+	FILE *file = fopen(name, "r");
 	assert(file);
 
 	char* buf = NULL;
-	char* divptr = NULL;
 	uint32_t filesize = 0;
 
 	fseek(file, 0, SEEK_END);
@@ -30,8 +29,19 @@ void home_handler(struct mg_connection* conn, struct mg_http_message* request) {
 
 	filesize = fread(buf, sizeof(*buf), filesize, file);
 	buf[filesize] = '\0';
+	fclose(file);
+
+	return buf;
+}
 
 
+
+void home_handler(struct mg_connection* conn, struct mg_http_message* request) {
+	(void)request;
+
+
+	char* buf = file_to_str(HTML_PATH "home.html");
+	char* divptr = NULL;
 	divptr = strstr(buf, "class=\"board_list\"");
 	assert(divptr);
 
@@ -82,6 +92,121 @@ void home_handler(struct mg_connection* conn, struct mg_http_message* request) {
 	mg_http_write_chunk(conn, "", 0);
 }
 
+void board_handler(struct mg_connection* conn, struct mg_http_message* request) {
+
+	char board[16] = { 0 };
+	char* strptr = strchr(&request->uri.ptr[1], '/'); assert(strptr);
+	int len = strptr - request->uri.ptr + 1;
+	strncpy(board, request->uri.ptr, len);
+	//board[len++] = '/';
+	board[len] = '\0';
+
+	int board_id = 0;
+	char sql_stmt[256];
+	len = sprintf(sql_stmt, "SELECT id FROM Board WHERE url = \"%*s\" LIMIT 1;", len, board);
+	
+	sqlite3_stmt* stmt = NULL;
+
+	char* err = NULL;
+	int sres = 0;
+	sres = sqlite3_prepare(db, sql_stmt, len, &stmt, err);
+	assert(!sres);
+	sres = sqlite3_step(stmt);
+	if (sres != SQLITE_ROW) {
+		mg_http_reply(conn, 404, "", "");
+		return;
+	}
+
+	board_id = sqlite3_column_int(stmt, 0);
+
+	sres = sqlite3_finalize(stmt);
+
+
+	//Get Board posts
+		
+
+
+	mg_http_reply(conn, 200,
+		"Transfer-Encoding: chunked\r\n"
+		"Content-Type: text/html\r\n"
+		, "");
+		
+
+	char* html = file_to_str(HTML_PATH "board.html");
+	char* strbeg, * strend;
+	strbeg = html;
+	strend = strstr(strbeg, "class=\"boardname\""); assert(strend);
+	strend = strstr(strend, "</"); assert(strend);
+
+	mg_http_write_chunk(conn, strbeg, strend - strbeg);
+
+	mg_http_printf_chunk(conn, board);
+
+	strbeg = strend;
+	strend = strstr(strbeg, "class=\"thread_list\""); assert(strend);
+	strend = strstr(strend, "</"); assert(strend);
+	mg_http_write_chunk(conn, strbeg, strend - strbeg);
+
+
+
+	//getting all threads
+	//len = sprintf(sql_stmt, "SELECT * from Post WHERE thread_id IN (SELECT id FROM THREAD WHERE board_id = %d);", board_id);
+	const int max_threads = 30;
+	int* threads = calloc(max_threads, sizeof(*threads)); assert(threads);
+	int thread_count = 0;
+
+	len = sprintf(sql_stmt, "SELECT id FROM Thread WHERE board_id = %d;", board_id);
+
+	sres = sqlite3_prepare(db, sql_stmt, len, &stmt, err);
+	assert(sres == SQLITE_OK);
+
+	while ((sres = sqlite3_step(stmt)) == SQLITE_ROW) {
+		threads[thread_count++] = sqlite3_column_int(stmt, 0);
+	}
+	assert(sres == SQLITE_DONE);
+	sqlite3_finalize(stmt);
+
+
+	//printing threads data
+	/*
+	mg_http_printf_chunk(conn, 
+		"<tr>"
+		"<th>id</th>"
+		"<th>description</th>"
+		"<th>date</th>"
+		"<th>message</th>"
+		"</tr>"
+	);
+	*/
+	for (int i = 0; i < thread_count; i++) {
+		len = sprintf(sql_stmt, "SELECT * FROM Post WHERE thread_id = %d LIMIT 1;", threads[i]);
+		sres = sqlite3_prepare(db, sql_stmt, len, &stmt, err);
+		assert(sres == SQLITE_OK);
+
+		sres = sqlite3_step(stmt);
+		mg_http_printf_chunk(conn, "<tr>");
+		for (int j = 0; j < sqlite3_column_count(stmt); j++) {
+			mg_http_printf_chunk(conn, "<td>%s</td>", sqlite3_column_text(stmt, j));
+		}
+		mg_http_printf_chunk(conn, "</tr>");
+
+		sres = sqlite3_finalize(stmt);
+	}
+
+	free(threads);
+
+	mg_http_write_chunk(conn, strend, strlen(strend));
+
+	free(html);
+
+	mg_http_write_chunk(conn, "", 0);
+
+
+
+
+
+}
+
 void event_handler_cb(struct mg_connection* conn, int ev, void* ev_data, void* fn_data) {
 
 
@@ -121,6 +246,9 @@ void event_handler_cb(struct mg_connection* conn, int ev, void* ev_data, void* f
 				.root_dir = HTML_PATH,
 			};
 			mg_http_serve_file(conn, &request, HTML_PATH "favicon.ico", &opts);
+		}
+		else {
+			board_handler(conn, &request);
 		}
 
 
